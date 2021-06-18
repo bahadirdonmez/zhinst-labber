@@ -24,6 +24,9 @@ class Driver(LabberDriver):
         self.controller.setup()
         self.controller.connect_device()
         self.last_length = [0] * 2
+        self.update_labber_controller("Revisions - Data Server Version")
+        self.update_labber_controller("Revisions - Firmware Version")
+        self.update_labber_controller("Revisions - FPGA Version")
 
     def performClose(self, bError=False, options={}):
         """Perform the close instrument connection operation"""
@@ -46,6 +49,14 @@ class Driver(LabberDriver):
 
         loop_index, n_HW_loop = self.getHardwareLoopIndex(options)
 
+        # Load factory preset
+        if "Factory Reset" in quant.name:
+            self.factory_reset()
+
+        # connection to PQSC
+        if "Connect to PQSC" in quant.name:
+            self.connect_to_pqsc(value)
+
         # if a 'set_cmd' is defined, just set the node
         if quant.set_cmd:
             value = self.set_node_value(quant, value)
@@ -66,7 +77,7 @@ class Driver(LabberDriver):
 
         # crosstalk - reset button
         if quant.name == "Crosstalk - Reset":
-            self.set_cosstalk_matrix(np.eye(10))
+            self.set_crosstalk_matrix(np.eye(10))
 
         # integration time
         if quant.name == "Integration - Time":
@@ -173,7 +184,10 @@ class Driver(LabberDriver):
         if self.getValue("QA Results - Enable"):
             self.controller._set("/qas/0/result/enable", 1)
             self.controller.arm()
-        if self.getValue("Sequencer - Trigger Mode") == "External Trigger":
+        if self.getValue("Sequencer - Trigger Mode") in [
+            "Receive Trigger",
+            "ZSync Trigger",
+        ]:
             self.controller.awg.run()
 
     def set_node_value(self, quant, value):
@@ -186,6 +200,11 @@ class Driver(LabberDriver):
         else:
             self.controller._set(quant.set_cmd, value)
         return self.controller._get(quant.get_cmd)
+
+    def update_labber_controller(self, quant_name):
+        """Read the quantity from device and update the Labber controller."""
+        value = self.readValueFromOther(quant_name)
+        self.setValue(quant_name, str(value))
 
     def awg_start_stop(self, quant, value):
         """Handles setting of nodes with 'set_cmd'."""
@@ -203,6 +222,16 @@ class Driver(LabberDriver):
             params = self.get_sequence_params()
             if params["sequence_type"] != "None":
                 self.controller.awg.set_sequence_params(**params)
+            if params["trigger_mode"] == "ZSync Trigger":
+                if params["sequence_type"] == "None":
+                    self.controller.awg.set_sequence_params(
+                        trigger_mode="ZSync Trigger"
+                    )
+                # read the relevant settings from the device and update
+                # the Labber controller
+                self.update_labber_controller("Sequencer - Strobe Slope")
+                self.update_labber_controller("Sequencer - Valid Polarity")
+                self.update_labber_controller("Sequencer - Valid Index")
 
     def get_sequence_params(self):
         """Retrieves all sequence parameters from Labber quantities and returns
@@ -252,7 +281,7 @@ class Driver(LabberDriver):
         if sequence_type == "Simple":
             self.controller.awg.upload_waveforms()
 
-    def set_cosstalk_matrix(self, matrix):
+    def set_crosstalk_matrix(self, matrix):
         """Set the crosstalk matrix as a 2D numpy array."""
         rows, cols = matrix.shape
         for r in range(rows):
@@ -269,3 +298,15 @@ class Driver(LabberDriver):
         real = np.mean(np.real(data1))
         imag = np.mean(np.real(data2))
         return real + 1j * imag
+
+    def factory_reset(self) -> None:
+        """Loads the factory default settings."""
+        self.controller.factory_reset()
+
+    def connect_to_pqsc(self, value):
+        if value:
+            self.controller.enable_qccs_mode()
+            self.update_labber_controller("Device - Reference Clock")
+            self.update_labber_controller("Digital I/O - Ext Clock")
+            self.update_labber_controller("Digital I/O - Mode")
+            self.update_labber_controller("Digital I/O - Drive")
