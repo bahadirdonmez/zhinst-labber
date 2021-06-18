@@ -25,6 +25,11 @@ class Driver(LabberDriver):
         self.controller.setup()
         self.controller.connect_device()
         self.last_length = [0] * 8
+        # read the revision numbers after the connection
+        # and update Labber controller.
+        self.update_labber_controller("Revisions - Data Server Version")
+        self.update_labber_controller("Revisions - Firmware Version")
+        self.update_labber_controller("Revisions - FPGA Version")
 
     def performClose(self, bError=False, options={}):
         """Perform the close instrument connection operation"""
@@ -46,6 +51,14 @@ class Driver(LabberDriver):
             self.replace_waveform = [False] * 8
 
         loop_index, n_HW_loop = self.getHardwareLoopIndex(options)
+
+        # Load factory preset
+        if "Factory Reset" in quant.name:
+            self.factory_reset()
+
+        # connection to PQSC
+        if "Connect to PQSC" in quant.name:
+            self.connect_to_pqsc(value)
 
         # if a 'set_cmd' is defined, just set the node
         if quant.set_cmd:
@@ -146,7 +159,9 @@ class Driver(LabberDriver):
                 sequence = self.getValue(base_name + "Sequence")
                 if trigger == "Send Trigger" and sequence != "None":
                     self.controller.awgs[i].run()
-                    self.controller.awgs[i].wait_done()
+                    if self.controller._get(f"awgs/{i}/single"):
+                        self.controller.awgs[i].wait_done()
+
         return value
 
     def performGetValue(self, quant, options={}):
@@ -164,7 +179,7 @@ class Driver(LabberDriver):
             trigger = self.getValue(base_name + "Trigger Mode")
             sequence = self.getValue(base_name + "Sequence")
             # only start AWG if used as slave and if a sequence is selected
-            if trigger == "External Trigger" and sequence != "None":
+            if trigger in ["Receive Trigger", "ZSync Trigger"] and sequence != "None":
                 self.controller.awgs[i].run()
 
     def set_node_value(self, quant, value):
@@ -179,10 +194,15 @@ class Driver(LabberDriver):
             self.controller._set(quant.set_cmd, value)
         return self.controller._get(quant.get_cmd)
 
+    def update_labber_controller(self, quant_name):
+        """Read the quantity from device and update the Labber controller."""
+        value = self.readValueFromOther(quant_name)
+        self.setValue(quant_name, str(value))
+
     def awg_start_stop(self, quant, value):
         """Starts or stops the respective AWG Core depending on the value."""
         i = map_name_to_awg(quant.name)
-        if value:
+        if not self.controller.awgs[i].is_running and value:
             self.controller.awgs[i].run()
         else:
             self.controller.awgs[i].stop()
@@ -193,10 +213,20 @@ class Driver(LabberDriver):
     def update_sequencers(self):
         """Handles the 'set_sequence_params(...)' for the AWGs."""
         for i, updated in enumerate(self.sequencers_updated):
+            base_name = f"Sequencer {2*i + 1}-{2*i + 2} - "
             if updated:
                 params = self.get_sequence_params(i)
                 if params["sequence_type"] != "None":
                     self.controller.awgs[i].set_sequence_params(**params)
+                if params["trigger_mode"] == "ZSync Trigger":
+                    if params["sequence_type"] == "None":
+                        self.controller.awgs[i].set_sequence_params(
+                            trigger_mode="ZSync Trigger"
+                        )
+                    # read the relevant settings from the device and update
+                    # the Labber controller
+                    self.update_labber_controller(base_name + "Strobe Slope")
+                    self.update_labber_controller(base_name + "Valid Polarity")
 
     def get_sequence_params(self, seq):
         """Retrieves all sequence parameters from Labber quantities and returns
@@ -257,6 +287,21 @@ class Driver(LabberDriver):
                     self.controller.awgs[seq].compile()
                 if sequence_type == "Simple":
                     self.controller.awgs[seq].compile_and_upload_waveforms()
+
+    def factory_reset(self) -> None:
+        """Loads the factory default settings."""
+        self.controller.factory_reset()
+
+    def connect_to_pqsc(self, value):
+        """Establish connection to PQSC"""
+        if value:
+            self.controller.enable_qccs_mode()
+            # read the relevant settings from the device and update
+            # the Labber controller
+            self.update_labber_controller("Device - Reference Clock")
+            self.update_labber_controller("Digital I/O - Interface")
+            self.update_labber_controller("Digital I/O - Mode")
+            self.update_labber_controller("Digital I/O - Drive")
 
 
 """
